@@ -5,7 +5,15 @@
 
 --selftest：打包后自检（验证 mapping.json 与输出模板在客户端内可正常解析），不启动界面。
 """
+import os
 import sys
+
+# PyInstaller windowed（console=False）模式下 sys.stdout/stderr 为 None，
+# 直接 print 会抛 AttributeError（Windows 上尤为明显）；重定向到空设备保证自检/日志不崩。
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w")
 
 from fin_summary.gui import main
 

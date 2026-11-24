@@ -1,0 +1,7 @@
+# Windows 批处理需 CRLF 行尾（cmd.exe 对 LF 支持不完整）
+*.bat text eol=crlf
+*.cmd text eol=crlf
+# Shell 脚本用 LF
+*.sh text eol=lf
+# xlsx 为二进制，勿让 git 做行尾转换
+*.xlsx binary

@@ -48,17 +48,18 @@ a = Analysis(
 
 # 再过滤二进制：本应用仅用 QtCore/QtGui/QtWidgets(+QtSvg/QtDBus/QtOpenGL)，
 # 剔除 QtPdf/QtQml/QtQuick/QtNetwork 等框架（PySide6 hook 会整体收集 Qt/lib，需在此过滤），
-# 以及依赖已剔除模块的插件（tls/网络状态/qml 调试/虚拟键盘/iOS 触摸）
+# 以及依赖已剔除模块的插件（tls/网络状态/qml 调试/虚拟键盘/iOS 触摸/PDF 图片插件）
 _QT_DROP = ('QtPdf', 'QtQml', 'QtQuick', 'QtNetwork', 'QtVirtualKeyboard', 'QtQuick3D')
 _BIN_DROP = ('tls/', 'networkinformation/', 'qmltooling/', 'virtualkeyboard',
              'qtuiotouchplugin', 'libqpdf')
 
 
 def _drop(name: str) -> bool:
-    low = name.lower()
+    """跨平台匹配：统一路径分隔符（Windows TOC 用反斜杠）与 Qt6Xxx/QtXxx 命名差异。"""
+    norm = name.replace("\\", "/").replace("Qt6", "Qt")
+    low = norm.lower()
     if any(p in low for p in _BIN_DROP):
         return True
-    norm = name.replace('Qt6', 'Qt')  # Windows 上为 Qt6Pdf.dll 等
     return any(p in norm for p in _QT_DROP)
 
 
