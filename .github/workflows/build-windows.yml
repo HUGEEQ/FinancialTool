@@ -26,6 +26,17 @@ jobs:
       - name: Selftest
         run: dist\FinSummaryTool\FinSummaryTool.exe --selftest
 
+      - name: Verify bundle
+        shell: pwsh
+        run: |
+          $exe = "dist\FinSummaryTool\FinSummaryTool.exe"
+          if (-not (Test-Path $exe)) { throw "exe 不存在" }
+          $vc = Get-ChildItem -Path dist\FinSummaryTool -Recurse -Filter "vcruntime140*.dll"
+          if ($vc.Count -lt 2) { throw "缺少 VC 运行库 DLL（vcruntime140.dll / vcruntime140_1.dll），未装运行库的电脑会打不开" }
+          $qt = Get-ChildItem -Path dist\FinSummaryTool\_internal -Filter "Qt6Core.dll" -Recurse | Select-Object -First 1
+          if (-not $qt) { throw "缺少 Qt6Core.dll，PySide6 未正确打包" }
+          Write-Host "Bundle OK: exe + VC 运行库 + Qt 均就绪（目标机无需 Python / VC++ 运行库）"
+
       - name: Package zip
         shell: pwsh
         run: Compress-Archive -Path dist\FinSummaryTool -DestinationPath dist\FinSummaryTool-windows-x64.zip

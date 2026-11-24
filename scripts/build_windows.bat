@@ -30,6 +30,14 @@ if errorlevel 1 (
     exit /b 1
 )
 
+rem 4b) Bundle 校验：确认 VC 运行库已打入（未装运行库的电脑也能打开）
+if not exist dist\FinSummaryTool\_internal\vcruntime140.dll (
+    echo [警告] 未找到 vcruntime140.dll —— 目标电脑可能需要安装 VC++ 运行库
+    echo         建议改用已装 VC++ 运行库的机器构建，或让用户安装运行库
+) else (
+    echo [OK] VC 运行库已打入，目标电脑无需 Python 与 VC++ 运行库
+)
+
 rem 5) 压缩分发包
 powershell -NoProfile -Command "if (Test-Path dist\FinSummaryTool-windows-x64.zip) { Remove-Item dist\FinSummaryTool-windows-x64.zip }; Compress-Archive -Path dist\FinSummaryTool -DestinationPath dist\FinSummaryTool-windows-x64.zip"
 
