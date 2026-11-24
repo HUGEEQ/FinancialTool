@@ -1,0 +1,37 @@
+name: Build Windows Client
+
+# 手动触发或打 tag 时触发；在 Windows 云主机上自动构建 FinSummaryTool.exe
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install -r requirements.txt -r requirements-build.txt
+
+      - name: Build
+        run: python -m PyInstaller --noconfirm --clean FinSummaryTool.spec
+
+      - name: Selftest
+        run: dist\FinSummaryTool\FinSummaryTool.exe --selftest
+
+      - name: Package zip
+        shell: pwsh
+        run: Compress-Archive -Path dist\FinSummaryTool -DestinationPath dist\FinSummaryTool-windows-x64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FinSummaryTool-windows-x64
+          path: dist/FinSummaryTool-windows-x64.zip
