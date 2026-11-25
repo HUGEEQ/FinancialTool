@@ -17,7 +17,7 @@ from PySide6.QtGui import QColor, QFont, QIntValidator
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QGridLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
-    QPlainTextEdit, QPushButton, QRadioButton, QSpinBox, QSplitter, QStatusBar,
+    QPlainTextEdit, QPushButton, QRadioButton, QSplitter, QStatusBar,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
