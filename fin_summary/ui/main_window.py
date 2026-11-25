@@ -13,7 +13,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor, QFont, QIntValidator
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QGridLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
@@ -237,13 +237,16 @@ class MainWindow(QMainWindow):
         positions = [(57, 0, 0), (58, 0, 2), (59, 1, 0), (60, 1, 2)]
         for row, r_i, c_i in positions:
             grid.addWidget(QLabel(W.MANUAL_LABELS[row]), r_i, c_i)
-            sp = QSpinBox()
-            sp.setRange(0, W.MANUAL_MAX)
-            sp.setMaximumWidth(76)  # 6 位数足够（人数上限 999999），把宽度留给标签
-            sp.setValue(last.get(row, 0))
-            sp.valueChanged.connect(self._update_manual_hint)
-            self.manual_spins[row] = sp
-            grid.addWidget(sp, r_i, c_i + 1)
+            ed = QLineEdit()
+            ed.setValidator(QIntValidator(0, W.MANUAL_MAX))  # 仅数字，0~999999
+            ed.setMaxLength(6)
+            ed.setMaximumWidth(76)
+            ed.setAlignment(Qt.AlignRight)
+            ed.setPlaceholderText("0")
+            ed.setText(str(last.get(row, 0)))
+            ed.textChanged.connect(self._update_manual_hint)
+            self.manual_spins[row] = ed
+            grid.addWidget(ed, r_i, c_i + 1)
         grid.setColumnStretch(3, 1)
         outer.addLayout(grid)
         self.lb_manual_hint = QLabel()
@@ -432,17 +435,28 @@ class MainWindow(QMainWindow):
             return None
         return m
 
+    @staticmethod
+    def _manual_value(ed: QLineEdit) -> Decimal:
+        """输入框 → 人数（空 = 0；0 是有效值，不等于未填）。"""
+        txt = ed.text().strip()
+        if not txt:
+            return Decimal("0")
+        try:
+            return Decimal(txt)
+        except Exception:
+            return Decimal("0")
+
     def _manual(self) -> dict:
         """4 项人数原样提交（0 是有效值，不等于未填）。
 
         「未填」只发生在 CLI 未提供 --manual 的场景；界面端输入框始终有值，
         是否已审核由 V2.10 的逐项人工确认把关。
         """
-        return {row: Decimal(sp.value()) for row, sp in self.manual_spins.items()}
+        return {row: self._manual_value(ed) for row, ed in self.manual_spins.items()}
 
     def _update_manual_hint(self):
         """四个人数全为 0 时给一句非阻断提示（0 有效，但提醒确认是否已取得人力数据）。"""
-        if all(sp.value() == 0 for sp in self.manual_spins.values()):
+        if all(self._manual_value(ed) == 0 for ed in self.manual_spins.values()):
             self.lb_manual_hint.setText(
                 "四个人数均为 0（0 是有效值）。如本期尚未取得人力部门数据，请先获取再计算。")
         else:
@@ -829,7 +843,7 @@ class MainWindow(QMainWindow):
         manual = dict(self.outcome.manual)
         manual[res.row] = v
         if res.row in self.manual_spins:
-            self.manual_spins[res.row].setValue(int(v))
+            self.manual_spins[res.row].setText(str(int(v)))
         self.outcome.recompute(manual)
         # 数值发生变化的行（含依赖它的公式行）取消确认，须重新核对
         changed = {r.row for r in self.outcome.results if before.get(r.row) != r.rounded}
