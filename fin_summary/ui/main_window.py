@@ -117,6 +117,7 @@ class MainWindow(QMainWindow):
         self.outcome = None
         self._thread = None
         self._outdir = _default_outdir()
+        self._notes_expanded = False
         self._build_ui()
         self._refresh()
 
@@ -288,6 +289,13 @@ class MainWindow(QMainWindow):
         self.lb_checks = QLabel()
         self.lb_checks.setStyleSheet("font-weight:bold;")
         h_checks.addWidget(self.lb_checks)
+        # ℹ 级口径提示折叠开关（默认一行，不占空间；悬停看全文）
+        self.btn_notes_toggle = QPushButton()
+        self.btn_notes_toggle.setFlat(True)
+        self.btn_notes_toggle.setVisible(False)
+        self.btn_notes_toggle.setStyleSheet("text-align:left; color:#666;")
+        self.btn_notes_toggle.clicked.connect(self._toggle_notes)
+        h_checks.addWidget(self.btn_notes_toggle)
         self.btn_accept_all_issues = QPushButton(W.BTN_ACCEPT_ALL_ISSUES)
         self.btn_accept_all_issues.setToolTip(W.TIP_ACCEPT_ALL)
         self.btn_accept_all_issues.setVisible(False)
@@ -507,6 +515,7 @@ class MainWindow(QMainWindow):
             self.lb_checks.setText("")
             self.lb_checks_detail.setText("")
             self.tbl_issues.setVisible(False)
+            self.btn_notes_toggle.setVisible(False)
             self.table.setRowCount(0)
             self.btn_export.setEnabled(False)
             self.btn_workpaper.setEnabled(False)
@@ -567,25 +576,29 @@ class MainWindow(QMainWindow):
             return f"数据核对：✅ 已通过（{n_acc} 项公司口径差异已接受）", ""
         if n_w:
             return f"数据核对：⚠️ {n_w} 项警告（不阻断导出）", ""
+        if oc.issues:  # 仅 ℹ 口径提示：空间让位给折叠开关（悬停看全文）
+            return W.CHECK_ALL_PASS, ""
         return W.CHECK_ALL_PASS, W.CHECK_PASS_SCOPE
 
     def _fill_issues(self, oc):
-        """核对问题列表：E 级未接受→接受按钮；已接受→撤销按钮；W/I→只读。"""
+        """核对问题展示：有可操作项(❗/⚠)→展开表格；仅 ℹ 口径提示→折叠为一行（悬停看全文）。"""
         issues = oc.issues
         if not issues:
             self.tbl_issues.setVisible(False)
+            self.btn_notes_toggle.setVisible(False)
             return
-        # 排序：未接受 E → 已接受 E → W → I
-        def order(i: "Issue"):
+        actionable = [i for i in issues if i.level in (Level.E, Level.W)]
+        notes = [i for i in issues if i.level == Level.I]
+
+        def order(i):
             k = issue_key(i)
             if i.level == Level.E:
                 return 0 if k not in oc.accepted_issues else 1
             return 2 if i.level == Level.W else 3
 
-        issues = sorted(issues, key=order)
-        self.tbl_issues.setVisible(True)
-        self.tbl_issues.setRowCount(len(issues))
-        for row, issue in enumerate(issues):
+        ordered = sorted(actionable + notes, key=order)
+        self.tbl_issues.setRowCount(len(ordered))
+        for row, issue in enumerate(ordered):
             key = issue_key(issue)
             accepted = key in oc.accepted_issues
             mark = W.CHECK_E_MARK if issue.level == Level.E else (
@@ -595,8 +608,7 @@ class MainWindow(QMainWindow):
                 text += f"（{issue.detail}）"
             if accepted:
                 rec = oc.accepted_issues[key]
-                reason = rec.get("reason") or "未填原因"
-                text = f"✅ 已接受：{issue.title}（原因：{reason}）"
+                text = f"✅ 已接受：{issue.title}（原因：{rec.get('reason') or '未填原因'}）"
             it = QTableWidgetItem(text)
             it.setFlags(it.flags() & ~Qt.ItemIsEditable)
             it.setToolTip(text)
@@ -617,6 +629,29 @@ class MainWindow(QMainWindow):
             else:
                 self.tbl_issues.setItem(row, 1, QTableWidgetItem(""))
         self.tbl_issues.resizeRowsToContents()
+
+        if actionable:
+            # 需要操作：表格常开
+            self.tbl_issues.setVisible(True)
+            self.btn_notes_toggle.setVisible(False)
+        else:
+            # 仅口径提示：折叠为一行，默认收起
+            self._notes_expanded = False
+            self.btn_notes_toggle.setVisible(True)
+            self.tbl_issues.setVisible(False)
+            self._update_notes_toggle(len(notes))
+
+    def _update_notes_toggle(self, n: int):
+        arrow = "▴" if not self.tbl_issues.isHidden() else "▾"
+        self.btn_notes_toggle.setText(W.NOTES_TOGGLE_FMT.format(n=n, arrow=arrow))
+        self.btn_notes_toggle.setToolTip(W.NOTES_TOGGLE_TIP)
+
+    def _toggle_notes(self):
+        if self.outcome is None:
+            return
+        self.tbl_issues.setVisible(self.tbl_issues.isHidden())
+        n = sum(1 for i in self.outcome.issues if i.level == Level.I)
+        self._update_notes_toggle(n)
 
     def _accept(self, issue):
         """接受某条校验差异：输入原因（可空）→ 放行 → 留痕。"""

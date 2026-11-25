@@ -19,6 +19,10 @@ logs_test/
 output/
 *.log
 
+# doc/ 下的真实数据文件不入库（仅保留模板与文档）
+doc/*.xlsx
+!doc/财务计算模板.xlsx
+
 # 系统垃圾
 .DS_Store
 Thumbs.db
