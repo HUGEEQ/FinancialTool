@@ -10,7 +10,7 @@ from .engine import compute
 from .loader import Inputs, ParseError, layout_snapshot, load_inputs
 from .logger import RunLogger, file_sha256, gen_run_id
 from .models import CalcResult, Issue, Level, RowStatus
-from .validator import validate
+from .validator import issue_key, validate
 
 MANUAL_ROWS = (57, 58, 59, 60)
 
@@ -28,7 +28,8 @@ class Outcome:
     results: list[CalcResult]
     issues: list[Issue]
     manual: dict[int, Decimal]
-    acknowledged: set[int] = field(default_factory=set)   # 已"已知悉"的 ⚠ 行
+    acknowledged: set[int] = field(default_factory=set)   # 已逐项人工确认的行次
+    accepted_issues: dict[str, dict] = field(default_factory=dict)  # 已「接受差异」的校验问题 key→{reason,time}
     exported_path: str | None = None
     calc_log: str = ""
     validation_log: str = ""
@@ -47,33 +48,46 @@ class Outcome:
     def table_issues(self) -> list[Issue]:
         return [i for i in self.issues if not i.rows]
 
+    def blocking_issues(self) -> list[Issue]:
+        """阻断导出的校验问题：E 级且未被「接受差异」。"""
+        return [i for i in self.issues
+                if i.level == Level.E and issue_key(i) not in self.accepted_issues]
+
     def can_export(self) -> tuple[bool, str]:
-        """导出条件：无错误、无待填报、且全部可确认项已人工确认（V2.10 逐项确认）。"""
-        fails, pendings = [], []
-        for r in self.results:
-            if r.status == RowStatus.FAIL:
-                fails.append(f"行 {r.row}「{r.name}」")
-            elif r.status == RowStatus.PENDING:
-                pendings.append(f"行 {r.row}（{r.name}）")
+        """导出条件：无未接受的 E 级校验差异、无待填报、且全部可确认项已人工确认。"""
+        fails = [f"「{i.title}」" for i in self.blocking_issues()]
+        pendings = [f"行 {r.row}（{r.name}）" for r in self.results if r.status == RowStatus.PENDING]
         done, total = self.confirm_progress()
         unconfirmed = total - done
         if not (fails or pendings or unconfirmed):
             return True, "可以导出"
         parts = []
         if fails:
-            parts.append(f"校验失败 {len(fails)} 项: " + "、".join(fails[:3]) + ("…" if len(fails) > 3 else ""))
+            parts.append(f"校验差异未接受 {len(fails)} 项（可在数据核对区点「接受差异」放行）: "
+                         + "、".join(fails[:3]) + ("…" if len(fails) > 3 else ""))
         if pendings:
             parts.append(f"人工数据待填报 {len(pendings)} 项: " + "、".join(pendings))
         if unconfirmed:
             parts.append(f"尚有 {unconfirmed} 项未人工确认（已确认 {done}/{total}）")
         return False, "；".join(parts)
 
+    def accept_issue(self, issue: Issue, reason: str = "") -> None:
+        """接受某条校验差异（公司口径可接受），带原因留痕。"""
+        from datetime import datetime
+        self.accepted_issues[issue_key(issue)] = {
+            "reason": reason, "time": datetime.now().isoformat(timespec="seconds")}
+
+    def unaccept_issue(self, issue: Issue) -> None:
+        self.accepted_issues.pop(issue_key(issue), None)
+
     def recompute(self, manual: dict[int, Decimal]) -> None:
-        """人工数据变化后重算（保留仍为可确认状态的已确认行）。"""
+        """人工数据变化后重算（保留仍为可确认状态的已确认行与仍存在的已接受差异）。"""
         self.manual = dict(manual)
         self.results = compute(self.items, self.inputs, self.config, self.manual)
         self.issues = validate(self.inputs, self.results, self.config, self.items)
         self.acknowledged &= self.confirmable_rows()
+        live = {issue_key(i) for i in self.issues}
+        self.accepted_issues = {k: v for k, v in self.accepted_issues.items() if k in live}
 
     def row_matrix(self) -> dict[int, str]:
         return {r.row: r.status.value for r in self.results}
@@ -165,6 +179,9 @@ def export_run(outcome: Outcome, outdir: str, confirmations: list[dict] | None =
         },
         "manual": {str(k): str(v) for k, v in outcome.manual.items()},
         "confirmations": confirmations or [],
+        "accepted_issues": [
+            {"key": k, **v} for k, v in outcome.accepted_issues.items()
+        ],
     }
     summary = logger.write_summary(payload)
     outcome.audit_summary = str(summary)

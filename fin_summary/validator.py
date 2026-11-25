@@ -1,6 +1,11 @@
 """校验体系：表级 VC 规则 + 行级状态挂接（设计文档第 6 章）。
 
+规则可配置（mapping.json 的 validation 段，V2.18）：
+  - severity：E（阻断导出）/ W（警告）/ I（提示）——公司特殊口径可将规则降级；
+  - enabled=false：关闭该规则；
+  - tolerance：容差（元），覆盖默认 0.01 元。
 Issue.title 使用财务语言（面向财务人员）；规则编号保留在 Issue.rule，供日志与底稿追溯。
+单次差异也可在界面「接受差异」（带原因，留痕审计），不必改配置。
 差异金额一律按万元展示（与工具输出口径一致）；需精确到元时，看结果表「原始值(万元)」
 列（全精度，点单元格可见完整值）或钻取明细中的元金额。
 """
@@ -15,6 +20,30 @@ TOL = Decimal("0.01")
 _WAN = Decimal("10000")
 
 
+def issue_key(issue: Issue) -> str:
+    """校验问题唯一键（用于「接受差异」跟踪）。"""
+    return f"{issue.rule}|{','.join(map(str, issue.rows))}|{issue.title}"
+
+
+def _rule_cfg(config: dict) -> dict:
+    return ((config or {}).get("validation") or {}).get("rules") or {}
+
+
+def _default_tol(config: dict) -> Decimal:
+    try:
+        return Decimal(str(((config or {}).get("validation") or {}).get("tolerance", TOL)))
+    except Exception:
+        return TOL
+
+
+def _tol(rules: dict, rule: str, default: Decimal) -> Decimal:
+    c = rules.get(rule) or {}
+    try:
+        return Decimal(str(c.get("tolerance", default)))
+    except Exception:
+        return default
+
+
 def _wan(v) -> str:
     """元 → 万元字符串（千分位 2 位）。"""
     return f"{Decimal(v) / _WAN:,.2f}"
@@ -26,28 +55,42 @@ def _wan_signed(v) -> str:
 
 def validate(inputs: Inputs, results: list[CalcResult], config: dict, items: list[ItemSpec]) -> list[Issue]:
     """执行全部表级校验，返回问题列表（行级挂接见 issue.rows）。"""
+    rules = _rule_cfg(config)
+    d_tol = _default_tol(config)
     issues = []
-    issues += _trial_balance(inputs)
-    issues += _bs_checks(inputs)
-    issues += _is_checks(inputs)
-    issues += _cf_checks(inputs)
+    issues += _trial_balance(inputs, rules, d_tol)
+    issues += _bs_checks(inputs, rules, d_tol)
+    issues += _is_checks(inputs, rules, d_tol)
+    issues += _cf_checks(inputs, rules, d_tol)
     issues += _seq_checks(inputs)
-    issues += _cross_checks(inputs, config, items)
-    _attach_row_status(issues, results)
-    return issues
+    issues += _cross_checks(inputs, config, items, rules, d_tol)
+    # 应用配置：关闭 / 级别覆盖
+    # 语义：severity 仅允许把默认 E 级规则降级为 W/I（放宽公司口径）；W/I 级规则保持默认，不加严。
+    out = []
+    for i in issues:
+        c = rules.get(i.rule) or {}
+        if c.get("enabled") is False:
+            continue
+        sev = str(c.get("severity", "")).upper()
+        if sev in ("W", "I") and i.level == Level.E:
+            i.level = Level(sev)
+        out.append(i)
+    _attach_row_status(out, results)
+    return out
 
 
 # ---------- VC-12 试算平衡（按一级科目汇总） ----------
 
-def _trial_balance(inputs: Inputs) -> list[Issue]:
+def _trial_balance(inputs: Inputs, rules: dict, d_tol: Decimal) -> list[Issue]:
     issues = []
     tb = inputs.tb
+    tol = _tol(rules, "VC-12", d_tol)
     pairs = [("年初", "年初借", "年初贷"), ("期初", "期初借", "期初贷"), ("期末", "期末借", "期末贷")]
     for label, df, cf in pairs:
         diff = tb.top_balance(df, cf)
-        if abs(diff) > TOL:
+        if abs(diff) > tol:
             issues.append(Issue("VC-12", Level.E, f"科目余额表借贷不平衡（{label}）",
-                                f"借方 − 贷方 = {_wan_signed(diff)} 万元（容差 ±0.01 万元）"))
+                                f"借方 − 贷方 = {_wan_signed(diff)} 万元（容差 ±{_wan(tol)} 万元）"))
     if tb.duplicate_names:
         issues.append(Issue("VC-04", Level.W, "科目余额表有重名科目",
                             "、".join(tb.duplicate_names[:10]) + "，请检查是否有科目录重了"))
@@ -56,7 +99,7 @@ def _trial_balance(inputs: Inputs) -> list[Issue]:
 
 # ---------- VC-13/14 资产负债表勾稽 ----------
 
-def _bs_checks(inputs: Inputs) -> list[Issue]:
+def _bs_checks(inputs: Inputs, rules: dict, d_tol: Decimal) -> list[Issue]:
     issues = []
     bs = inputs.bs_table
 
@@ -66,19 +109,19 @@ def _bs_checks(inputs: Inputs) -> list[Issue]:
 
     try:
         zc, fz, qy = val("资产合计"), val("负债合计"), val("所有者权益合计")
-        if abs(zc - fz - qy) > TOL:
+        if abs(zc - fz - qy) > _tol(rules, "VC-13", d_tol):
             issues.append(Issue("VC-13", Level.E, "资产负债表不平衡：资产 ≠ 负债 + 所有者权益",
                                 f"资产 {_wan(zc)} 万元 vs 负债+权益 {_wan(fz + qy)} 万元"
                                 f"（差 {_wan_signed(zc - fz - qy)} 万元）",
                                 rows=[23, 32, 39]))
         ldz, fldz = val("流动资产合计"), val("非流动资产合计")
-        if abs(ldz + fldz - zc) > TOL:
+        if abs(ldz + fldz - zc) > _tol(rules, "VC-14", d_tol):
             issues.append(Issue("VC-14", Level.E, "资产负债表：流动 + 非流动资产的合计 ≠ 资产合计",
                                 f"{_wan(ldz)} + {_wan(fldz)} ≠ {_wan(zc)} 万元"
                                 f"（差 {_wan_signed(ldz + fldz - zc)} 万元）",
                                 rows=[23, 24]))
         flfz, flz = val("流动负债合计"), val("非流动负债合计")
-        if abs(flfz + flz - fz) > TOL:
+        if abs(flfz + flz - fz) > _tol(rules, "VC-14", d_tol):
             issues.append(Issue("VC-14", Level.E, "资产负债表：流动 + 非流动负债的合计 ≠ 负债合计",
                                 f"{_wan(flfz)} + {_wan(flz)} ≠ {_wan(fz)} 万元"
                                 f"（差 {_wan_signed(flfz + flz - fz)} 万元）",
@@ -90,7 +133,7 @@ def _bs_checks(inputs: Inputs) -> list[Issue]:
 
 # ---------- VC-15/16 利润表勾稽 ----------
 
-def _is_checks(inputs: Inputs) -> list[Issue]:
+def _is_checks(inputs: Inputs, rules: dict, d_tol: Decimal) -> list[Issue]:
     issues = []
     is_t = inputs.is_table
 
@@ -116,7 +159,7 @@ def _is_checks(inputs: Inputs) -> list[Issue]:
                 + val0("其他收益") + val0("投资收益")
                 + val0("公允价值变动收益") + val0("资产处置收益"))
         op = val("营业利润")
-        if abs(calc - op) > TOL:
+        if abs(calc - op) > _tol(rules, "VC-15", d_tol):
             issues.append(Issue("VC-15", Level.E,
                                 "利润表不平：营业利润与「收入−成本−费用±减值±收益」算出的结果不符",
                                 f"按构成计算 {_wan(calc)} 万元 vs 报表 {_wan(op)} 万元"
@@ -124,12 +167,12 @@ def _is_checks(inputs: Inputs) -> list[Issue]:
                                 rows=[17]))
         op2 = op + val0("营业外收入") - val0("营业外支出") + val0("以前年度损益调整")
         tp = val("利润总额")
-        if abs(op2 - tp) > TOL:
+        if abs(op2 - tp) > _tol(rules, "VC-16", d_tol):
             issues.append(Issue("VC-16", Level.E, "利润表不平：利润总额 ≠ 营业利润 + 营业外收入 − 营业外支出",
                                 f"{_wan(op2)} ≠ {_wan(tp)} 万元（差 {_wan_signed(op2 - tp)} 万元）",
                                 rows=[20]))
         np = val("净利润")
-        if abs(tp - val0("所得税费用") - np) > TOL:
+        if abs(tp - val0("所得税费用") - np) > _tol(rules, "VC-16", d_tol):
             issues.append(Issue("VC-16", Level.E, "利润表不平：净利润 ≠ 利润总额 − 所得税费用",
                                 f"{_wan(tp)} − 所得税 ≠ {_wan(np)} 万元"
                                 f"（差 {_wan_signed(tp - val0('所得税费用') - np)} 万元）",
@@ -141,9 +184,10 @@ def _is_checks(inputs: Inputs) -> list[Issue]:
 
 # ---------- VC-17 现金流量表勾稽 ----------
 
-def _cf_checks(inputs: Inputs) -> list[Issue]:
+def _cf_checks(inputs: Inputs, rules: dict, d_tol: Decimal) -> list[Issue]:
     issues = []
     cf = inputs.cf_table
+    tol = _tol(rules, "VC-17", d_tol)
 
     def val(name):
         v, _, _ = cf.get(name)
@@ -151,25 +195,27 @@ def _cf_checks(inputs: Inputs) -> list[Issue]:
 
     try:
         net_op = val("经营活动产生的现金净流量")
-        if abs(val("经营活动现金流入小计") - val("经营活动现金流出小计") - net_op) > TOL:
+        if abs(val("经营活动现金流入小计") - val("经营活动现金流出小计") - net_op) > tol:
             issues.append(Issue("VC-17", Level.E, "现金流量表：经营活动净额 ≠ 流入小计 − 流出小计",
                                 rows=[41]))
         net_inv = val("投资活动产生的现金流量净额")
-        if abs(val("投资活动现金收入小计") - val("投资活动现金流出小计") - net_inv) > TOL:
+        if abs(val("投资活动现金收入小计") - val("投资活动现金流出小计") - net_inv) > tol:
             issues.append(Issue("VC-17", Level.E, "现金流量表：投资活动净额 ≠ 流入小计 − 流出小计"))
         net_fin = val("筹资活动产生的现金流量净额")
-        if abs(val("筹资活动现金流入小计") - val("筹资活动现金流出小计") - net_fin) > TOL:
+        if abs(val("筹资活动现金流入小计") - val("筹资活动现金流出小计") - net_fin) > tol:
             issues.append(Issue("VC-17", Level.E, "现金流量表：筹资活动净额 ≠ 流入小计 − 流出小计"))
         fx = val("汇率变动对现金及现金等价物的影响")
         inc_total = val("现金及现金等价物净增加额")
-        if abs(net_op + net_inv + net_fin + fx - inc_total) > TOL:
+        if abs(net_op + net_inv + net_fin + fx - inc_total) > tol:
             issues.append(Issue("VC-17", Level.E,
-                                "现金流量表：现金净增加额 ≠ 三大活动净额 + 汇率变动影响",
+                                "现金流量表：现金净增加额 ≠ 三大活动净额 + 汇率影响",
                                 f"差 {_wan_signed(net_op + net_inv + net_fin + fx - inc_total)} 万元",
                                 rows=[41]))
         end_cash, begin_cash = val("现金的期末余额"), val("现金的期初余额")
-        if abs(end_cash - begin_cash - inc_total) > TOL:
+        if abs(end_cash - begin_cash - inc_total) > tol:
             issues.append(Issue("VC-17", Level.E, "现金流量表：现金净增加额 ≠ 期末余额 − 期初余额",
+                                f"期末 {_wan(end_cash)} − 期初 {_wan(begin_cash)} ≠ 净增加额 {_wan(inc_total)} 万元"
+                                f"（差 {_wan_signed(end_cash - begin_cash - inc_total)} 万元）",
                                 rows=[41]))
     except KeyError as e:
         issues.append(Issue("VC-17", Level.W, f"现金流量表缺少勾稽所需项目「{e.args[0]}」，跳过该组核对"))
@@ -202,7 +248,8 @@ def _seq_checks(inputs: Inputs) -> list[Issue]:
 
 # ---------- VC-18/19 跨表勾稽（含口径白名单） ----------
 
-def _cross_checks(inputs: Inputs, config: dict, items: list[ItemSpec]) -> list[Issue]:
+def _cross_checks(inputs: Inputs, config: dict, items: list[ItemSpec],
+                  rules: dict, d_tol: Decimal) -> list[Issue]:
     issues = []
     # BS 项目名 → 输出行次（用于 W 级挂接）
     bs_item_rows: dict[str, int] = {}
@@ -215,7 +262,7 @@ def _cross_checks(inputs: Inputs, config: dict, items: list[ItemSpec]) -> list[I
     try:
         money, _, _ = inputs.bs_table.get("货币资金")
         end_cash, _, _ = inputs.cf_table.get("现金的期末余额")
-        if abs(money - end_cash) > TOL:
+        if abs(money - end_cash) > _tol(rules, "VC-18", d_tol):
             issues.append(Issue("VC-18", Level.W,
                                 "跨表不符：资产负债表「货币资金」≠ 现金流量表「现金的期末余额」",
                                 f"{_wan(money)} vs {_wan(end_cash)} 万元（差 {_wan_signed(money - end_cash)} 万元）",
@@ -225,6 +272,7 @@ def _cross_checks(inputs: Inputs, config: dict, items: list[ItemSpec]) -> list[I
 
     # VC-19 科目余额表 vs 报表
     bs = inputs.bs_table
+    tol19 = _tol(rules, "VC-19", d_tol)
     for cc in config.get("cross_checks", []):
         item = str(cc["item"])
         total = Decimal("0")
@@ -244,7 +292,7 @@ def _cross_checks(inputs: Inputs, config: dict, items: list[ItemSpec]) -> list[I
             issues.append(Issue("VC-19", Level.I, f"跨表抽查「{item}」报表无此项目"))
             continue
         diff = report_v - total
-        if abs(diff) > TOL:
+        if abs(diff) > tol19:
             detail = (f"资产负债表「{item}」{_wan(report_v)} 万元（净额）；科目余额 {_wan(total)} 万元（全额）；"
                       f"差额 {abs(diff) / _WAN:,.2f} 万元。{cc.get('note', '')}")
             if cc.get("known_diff"):

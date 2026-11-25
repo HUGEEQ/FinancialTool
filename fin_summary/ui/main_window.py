@@ -16,7 +16,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QGridLayout, QGroupBox,
-    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
+    QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
     QPlainTextEdit, QPushButton, QRadioButton, QSpinBox, QSplitter, QStatusBar,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 from .. import service
 from ..exporter import display_names
 from ..models import Level, RowStatus
+from ..validator import issue_key
 from . import wording as W
 from .worker import ComputeThread
 
@@ -283,9 +284,29 @@ class MainWindow(QMainWindow):
         self.lb_summary.setStyleSheet("font-weight:bold;")
         self.lb_summary.setToolTip(W.HELP_RESULT_HTML)  # 悬停显示核对说明与行状态图例
         v.addWidget(self.lb_summary)
+        h_checks = QHBoxLayout()
         self.lb_checks = QLabel()
         self.lb_checks.setStyleSheet("font-weight:bold;")
-        v.addWidget(self.lb_checks)
+        h_checks.addWidget(self.lb_checks)
+        self.btn_accept_all_issues = QPushButton(W.BTN_ACCEPT_ALL_ISSUES)
+        self.btn_accept_all_issues.setToolTip(W.TIP_ACCEPT_ALL)
+        self.btn_accept_all_issues.setVisible(False)
+        self.btn_accept_all_issues.clicked.connect(self._accept_all_issues)
+        h_checks.addWidget(self.btn_accept_all_issues)
+        h_checks.addStretch(1)
+        v.addLayout(h_checks)
+        # 核对问题列表（可交互：E 级差异可「接受差异」放行 / 撤销；无问题时隐藏）
+        self.tbl_issues = QTableWidget(0, 2)
+        self.tbl_issues.setHorizontalHeaderLabels(list(W.ISSUE_TBL_HEADERS))
+        self.tbl_issues.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.tbl_issues.setColumnWidth(1, 92)
+        self.tbl_issues.verticalHeader().setVisible(False)
+        self.tbl_issues.setSelectionMode(QTableWidget.NoSelection)
+        self.tbl_issues.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.tbl_issues.setMaximumHeight(160)
+        self.tbl_issues.setVisible(False)
+        v.addWidget(self.tbl_issues)
+        # 全部通过时的核对范围说明（有问题时由问题列表展示，隐藏本行）
         self.lb_checks_detail = QLabel()
         self.lb_checks_detail.setWordWrap(True)
         self.lb_checks_detail.setStyleSheet("color:#666;")
@@ -485,6 +506,7 @@ class MainWindow(QMainWindow):
             self.lb_summary.setText(W.EMPTY_SUMMARY)
             self.lb_checks.setText("")
             self.lb_checks_detail.setText("")
+            self.tbl_issues.setVisible(False)
             self.table.setRowCount(0)
             self.btn_export.setEnabled(False)
             self.btn_workpaper.setEnabled(False)
@@ -501,11 +523,14 @@ class MainWindow(QMainWindow):
                 fail_icon=W.STATUS_ICON["FAIL"], fail_n=c["FAIL"],
                 pending_icon=W.STATUS_ICON["PENDING"], pending_n=c["PENDING"],
                 const_icon=W.STATUS_ICON["CONST"], const_n=c["CONST"]))
-        summary, detail = self._check_panels(oc)
+        summary, detail = self._check_summary(oc)
         self.lb_checks.setText(summary)
+        self.btn_accept_all_issues.setVisible(bool(oc.blocking_issues()))
+        self._fill_issues(oc)
         self.lb_checks_detail.setText(detail)
+        self.lb_checks_detail.setVisible(bool(detail))
         has_problem = summary != W.CHECK_ALL_PASS
-        self.lb_checks_detail.setStyleSheet("color:#b71c1c;" if has_problem else "color:#666;")
+        self.lb_checks_detail.setStyleSheet("color:#666;")
 
         # 人工确认进度
         done, total = oc.confirm_progress()
@@ -527,36 +552,100 @@ class MainWindow(QMainWindow):
         self.btn_workpaper.setEnabled(True)
         self._update_export_btn()
 
-    def _check_panels(self, oc) -> tuple[str, str]:
-        """数据核对：返回 (汇总行, 明细行)。
-
-        全部通过：汇总行一句话，明细行说明核对范围（另有 ℹ️ 提示则附后）；
-        有问题：汇总行报错误/警告数量，明细行逐行列出（每行一条，不用｜分隔）。
-        """
-        problems, infos = [], []  # (mark, title, detail)
-        for _name, rules, _pass_text in W.CHECK_GROUPS:
-            rel = [i for i in oc.issues if i.rule in rules]
-            if not rel:
-                continue
-            e = next((i for i in rel if i.level == Level.E), None)
-            w = next((i for i in rel if i.level == Level.W), None)
-            first = e or w or rel[0]
-            mark = W.CHECK_E_MARK if e else (W.CHECK_W_MARK if w else "ℹ️")
-            (problems if (e or w) else infos).append((mark, first.title, first.detail))
-        info_lines = [f"ℹ️ {t}" + (f"（{d}）" if d else "") for _m, t, d in infos]
-        if not problems:
-            detail = W.CHECK_PASS_SCOPE + (("\n" + "\n".join(info_lines)) if info_lines else "")
-            return W.CHECK_ALL_PASS, detail
-        n_e = sum(1 for p in problems if p[0] == W.CHECK_E_MARK)
-        n_w = sum(1 for p in problems if p[0] == W.CHECK_W_MARK)
-        parts = []
-        if n_e:
-            parts.append(f"{W.CHECK_E_MARK} {n_e} 项错误")
+    def _check_summary(self, oc) -> tuple[str, str]:
+        """数据核对汇总行；返回 (汇总文字, 全部通过时的范围说明，否则空串)。"""
+        if not oc.issues:
+            return W.CHECK_ALL_PASS, W.CHECK_PASS_SCOPE
+        blocking = oc.blocking_issues()
+        n_acc = sum(1 for i in oc.issues
+                    if i.level == Level.E and issue_key(i) in oc.accepted_issues)
+        n_w = sum(1 for i in oc.issues if i.level == Level.W)
+        if blocking:
+            return (f"数据核对：❗ {len(blocking)} 项差异未接受"
+                    f"（公司口径可接受就点「接受差异」放行，否则修正数据后重算）", "")
+        if n_acc:
+            return f"数据核对：✅ 已通过（{n_acc} 项公司口径差异已接受）", ""
         if n_w:
-            parts.append(f"{W.CHECK_W_MARK} {n_w} 项警告")
-        summary = "数据核对：" + "　".join(parts)
-        lines = [f"{m} {t}" + (f"（{d}）" if d else "") for m, t, d in problems]
-        return summary, "\n".join(lines + info_lines)
+            return f"数据核对：⚠️ {n_w} 项警告（不阻断导出）", ""
+        return W.CHECK_ALL_PASS, W.CHECK_PASS_SCOPE
+
+    def _fill_issues(self, oc):
+        """核对问题列表：E 级未接受→接受按钮；已接受→撤销按钮；W/I→只读。"""
+        issues = oc.issues
+        if not issues:
+            self.tbl_issues.setVisible(False)
+            return
+        # 排序：未接受 E → 已接受 E → W → I
+        def order(i: "Issue"):
+            k = issue_key(i)
+            if i.level == Level.E:
+                return 0 if k not in oc.accepted_issues else 1
+            return 2 if i.level == Level.W else 3
+
+        issues = sorted(issues, key=order)
+        self.tbl_issues.setVisible(True)
+        self.tbl_issues.setRowCount(len(issues))
+        for row, issue in enumerate(issues):
+            key = issue_key(issue)
+            accepted = key in oc.accepted_issues
+            mark = W.CHECK_E_MARK if issue.level == Level.E else (
+                W.CHECK_W_MARK if issue.level == Level.W else "ℹ️")
+            text = f"{mark} {issue.title}"
+            if issue.detail:
+                text += f"（{issue.detail}）"
+            if accepted:
+                rec = oc.accepted_issues[key]
+                reason = rec.get("reason") or "未填原因"
+                text = f"✅ 已接受：{issue.title}（原因：{reason}）"
+            it = QTableWidgetItem(text)
+            it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+            it.setToolTip(text)
+            self.tbl_issues.setItem(row, 0, it)
+
+            btn = None
+            if issue.level == Level.E:
+                btn = QPushButton(W.BTN_UNACCEPT if accepted else W.BTN_ACCEPT)
+                btn.setToolTip(W.TIP_UNACCEPT if accepted else W.TIP_ACCEPT)
+                btn.clicked.connect(lambda _=False, i=issue, a=accepted:
+                                    self._unaccept(i) if a else self._accept(i))
+            elif issue.level == Level.W:
+                btn = QPushButton(W.BTN_ACK_W)
+                btn.setEnabled(False)
+                btn.setToolTip(W.TIP_ACK_W)
+            if btn is not None:
+                self.tbl_issues.setCellWidget(row, 1, btn)
+            else:
+                self.tbl_issues.setItem(row, 1, QTableWidgetItem(""))
+        self.tbl_issues.resizeRowsToContents()
+
+    def _accept(self, issue):
+        """接受某条校验差异：输入原因（可空）→ 放行 → 留痕。"""
+        reason, ok = QInputDialog.getText(
+            self, W.ACCEPT_DLG_TITLE,
+            f"「{issue.title}」\n\n{W.ACCEPT_DLG_PROMPT}")
+        if not ok:
+            return
+        self.outcome.accept_issue(issue, reason.strip())
+        self._refresh()
+
+    def _accept_all_issues(self):
+        """一次性接受本次运行全部校验差异（同一原因，逐条记录）。"""
+        if self.outcome is None:
+            return
+        blocking = self.outcome.blocking_issues()
+        if not blocking:
+            return
+        reason, ok = QInputDialog.getText(
+            self, W.ACCEPT_DLG_TITLE, W.ACCEPT_ALL_DLG_PROMPT.format(n=len(blocking)))
+        if not ok:
+            return
+        for issue in blocking:
+            self.outcome.accept_issue(issue, reason.strip())
+        self._refresh()
+
+    def _unaccept(self, issue):
+        self.outcome.unaccept_issue(issue)
+        self._refresh()
 
     def _fill_row(self, i, r):
         oc = self.outcome
@@ -738,10 +827,14 @@ class MainWindow(QMainWindow):
         inp = Path(oc.inputs.workbook_path).name if oc.inputs.workbook_path else "文件夹 / 压缩包（4 张报表）"
         out = Path(oc.exported_path).name if oc.exported_path else W.WORKPAPER_NOT_EXPORTED
 
-        check_summary, check_detail = self._check_panels(oc)
+        check_summary, check_detail = self._check_summary(oc)
         done, total = oc.confirm_progress()
         ack_text = (W.WORKPAPER_ACK_NONE if done == 0 else
                     (f"全部 {total} 项已确认" if done == total else f"已确认 {done}/{total} 项"))
+        if oc.accepted_issues:
+            acc = "；".join(f"{k.split('|')[0]}（{(v.get('reason') or '未填原因')}）"
+                            for k, v in oc.accepted_issues.items())
+            ack_text += f"；校验差异已接受 {len(oc.accepted_issues)} 项：{acc}"
 
         lines = [
             f"{W.WORKPAPER_RUN_ID}：{oc.run_id}（可用于追溯本次计算）",
@@ -750,8 +843,13 @@ class MainWindow(QMainWindow):
             f"{W.WORKPAPER_OUTPUT}：{out}",
             f"{W.WORKPAPER_CHECKS}：{check_summary}",
         ]
-        for ln in check_detail.split("\n"):
-            lines.append(f"  {ln}")
+        if check_detail:
+            for ln in check_detail.split("\n"):
+                lines.append(f"  {ln}")
+        for issue in oc.issues:
+            mark = "❗" if issue.level == Level.E else ("⚠️" if issue.level == Level.W else "ℹ️")
+            acc = "（已接受）" if issue_key(issue) in oc.accepted_issues else ""
+            lines.append(f"  {mark} {issue.title}{acc}")
         lines += [
             f"{W.WORKPAPER_ACKS}：{ack_text}",
             "",

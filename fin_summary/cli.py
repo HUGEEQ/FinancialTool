@@ -84,6 +84,8 @@ def main(argv=None) -> int:
     add_common(p1)
     p1.add_argument("--manual", help="4 项人工数据，逗号分隔")
     p1.add_argument("--ack-all", action="store_true", help="已逐项人工确认全部计算结果（记录确认）")
+    p1.add_argument("--accept-checks", action="store_true",
+                    help="接受全部校验差异（公司口径可接受，记录原因；等价界面的「接受差异」）")
     p1.add_argument("--export", action="store_true", help="通过导出条件后写输出文件")
     p1.add_argument("--outdir", default="output")
 
@@ -105,6 +107,10 @@ def main(argv=None) -> int:
         confirmable = {r.row for r in outcome.results
                        if r.status in (RowStatus.PASS, RowStatus.WARN, RowStatus.CONST)}
         outcome.acknowledged = confirmable
+
+    if getattr(args, "accept_checks", False):
+        for i in outcome.blocking_issues():
+            outcome.accept_issue(i, "CLI --accept-checks 批量接受")
 
     _print_results(outcome)
 

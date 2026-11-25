@@ -1,5 +1,5 @@
 {
-  "config_version": "2026.11.4",
+  "config_version": "2026.11.5",
   "rounding": {
     "mode": "HALF_UP",
     "divide": 10000,
@@ -1003,5 +1003,51 @@
       "note": "资产负债表按扣除坏账准备后的净额列示"
     }
   ],
-  "ignore_accounts": []
+  "ignore_accounts": [],
+  "validation": {
+    "_comment": "校验规则配置：severity 仅可将默认 E 级规则降级为 W(警告)/I(提示)（放宽公司口径，不加严）；enabled=false 关闭规则；tolerance 为容差(元)。单次差异也可在界面「接受差异」放行。",
+    "tolerance": 0.01,
+    "rules": {
+      "VC-12": {
+        "severity": "E",
+        "_desc": "科目余额表借贷不平衡"
+      },
+      "VC-13": {
+        "severity": "E",
+        "_desc": "资产负债表不平衡"
+      },
+      "VC-14": {
+        "severity": "E",
+        "_desc": "资产负债表合计数不符"
+      },
+      "VC-15": {
+        "severity": "E",
+        "_desc": "利润表营业利润勾稽不符"
+      },
+      "VC-16": {
+        "severity": "E",
+        "_desc": "利润表利润总额/净利润勾稽不符"
+      },
+      "VC-17": {
+        "severity": "E",
+        "_desc": "现金流量表勾稽不符"
+      },
+      "VC-18": {
+        "severity": "W",
+        "_desc": "货币资金与现金期末不一致"
+      },
+      "VC-19": {
+        "severity": "W",
+        "_desc": "报表数与科目余额不符"
+      },
+      "VC-25": {
+        "severity": "W",
+        "_desc": "报表行次不连续(可能串行)"
+      },
+      "VC-04": {
+        "severity": "W",
+        "_desc": "科目余额表重名科目"
+      }
+    }
+  }
 }

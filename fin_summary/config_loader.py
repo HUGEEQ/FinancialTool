@@ -13,10 +13,44 @@ VALID_KINDS = {"VALUE", "SUM", "CONST", "MANUAL", "FORMULA"}
 VALID_SOURCE_TYPES = {"IS", "BS", "CF", "TB"}
 TB_FIELDS = {"年初借", "年初贷", "期初借", "期初贷", "本期借", "本期贷",
              "累计借", "累计贷", "期末借", "期末贷"}
+VALID_SEVERITIES = {"E", "W", "I"}
 
 
 class MappingError(Exception):
     pass
+
+
+def _validate_validation_section(cfg: dict) -> None:
+    """校验 validation 段：severity 合法、tolerance 为数值、enabled 为布尔。"""
+    v = cfg.get("validation")
+    if v is None:
+        return
+    if not isinstance(v, dict):
+        raise MappingError("validation 段应为对象")
+    tol = v.get("tolerance")
+    if tol is not None:
+        try:
+            float(tol)
+        except (TypeError, ValueError):
+            raise MappingError(f"validation.tolerance 应为数值: {tol!r}")
+    rules = v.get("rules")
+    if rules is None:
+        return
+    if not isinstance(rules, dict):
+        raise MappingError("validation.rules 应为对象")
+    for rule, c in rules.items():
+        if not isinstance(c, dict):
+            raise MappingError(f"validation.rules.{rule} 应为对象")
+        sev = str(c.get("severity", "")).upper()
+        if sev and sev not in VALID_SEVERITIES:
+            raise MappingError(f"validation.rules.{rule}.severity 应为 E/W/I: {sev}")
+        if "enabled" in c and not isinstance(c["enabled"], bool):
+            raise MappingError(f"validation.rules.{rule}.enabled 应为布尔值")
+        if "tolerance" in c:
+            try:
+                float(c["tolerance"])
+            except (TypeError, ValueError):
+                raise MappingError(f"validation.rules.{rule}.tolerance 应为数值")
 
 
 def load_mapping(path: Path | None = None) -> tuple[dict, list[ItemSpec], str, str]:
@@ -34,6 +68,7 @@ def load_mapping(path: Path | None = None) -> tuple[dict, list[ItemSpec], str, s
     missing = REQUIRED_TOP - set(cfg)
     if missing:
         raise MappingError(f"mapping.json 缺少必需键: {missing}")
+    _validate_validation_section(cfg)
 
     items: list[ItemSpec] = []
     rows_seen: set[int] = set()
