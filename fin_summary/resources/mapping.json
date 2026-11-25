@@ -1,5 +1,5 @@
 {
-  "config_version": "2026.11.5",
+  "config_version": "2026.11.6",
   "rounding": {
     "mode": "HALF_UP",
     "divide": 10000,
@@ -1049,5 +1049,8 @@
         "_desc": "科目余额表重名科目"
       }
     }
-  }
+  },
+  "cash_equiv_exclude_accounts": [
+    "其他货币资金"
+  ]
 }

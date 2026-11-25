@@ -53,6 +53,25 @@ def _wan_signed(v) -> str:
     return f"{Decimal(v) / _WAN:+,.2f}"
 
 
+def _cash_equiv_extra(inputs: Inputs, config: dict) -> tuple[Decimal, Decimal, list[str]]:
+    """不计入现金等价物的货币资金科目（如其他货币资金，本公司口径）。
+
+    返回 (期末余额, 期初余额, 科目名列表)。用于识别现金流量表/跨表的已知口径差异。
+    """
+    names = (config or {}).get("cash_equiv_exclude_accounts") or []
+    end = Decimal("0")
+    begin = Decimal("0")
+    found = []
+    for n in names:
+        acct = inputs.tb.by_name.get(n)
+        if acct is None:
+            continue
+        end += acct.get("期末借") - acct.get("期末贷")
+        begin += acct.get("期初借") - acct.get("期初贷")
+        found.append(n)
+    return end, begin, found
+
+
 def validate(inputs: Inputs, results: list[CalcResult], config: dict, items: list[ItemSpec]) -> list[Issue]:
     """执行全部表级校验，返回问题列表（行级挂接见 issue.rows）。"""
     rules = _rule_cfg(config)
@@ -61,7 +80,7 @@ def validate(inputs: Inputs, results: list[CalcResult], config: dict, items: lis
     issues += _trial_balance(inputs, rules, d_tol)
     issues += _bs_checks(inputs, rules, d_tol)
     issues += _is_checks(inputs, rules, d_tol)
-    issues += _cf_checks(inputs, rules, d_tol)
+    issues += _cf_checks(inputs, rules, d_tol, config)
     issues += _seq_checks(inputs)
     issues += _cross_checks(inputs, config, items, rules, d_tol)
     # 应用配置：关闭 / 级别覆盖
@@ -184,7 +203,7 @@ def _is_checks(inputs: Inputs, rules: dict, d_tol: Decimal) -> list[Issue]:
 
 # ---------- VC-17 现金流量表勾稽 ----------
 
-def _cf_checks(inputs: Inputs, rules: dict, d_tol: Decimal) -> list[Issue]:
+def _cf_checks(inputs: Inputs, rules: dict, d_tol: Decimal, config: dict) -> list[Issue]:
     issues = []
     cf = inputs.cf_table
     tol = _tol(rules, "VC-17", d_tol)
@@ -212,11 +231,26 @@ def _cf_checks(inputs: Inputs, rules: dict, d_tol: Decimal) -> list[Issue]:
                                 f"差 {_wan_signed(net_op + net_inv + net_fin + fx - inc_total)} 万元",
                                 rows=[41]))
         end_cash, begin_cash = val("现金的期末余额"), val("现金的期初余额")
-        if abs(end_cash - begin_cash - inc_total) > tol:
-            issues.append(Issue("VC-17", Level.E, "现金流量表：现金净增加额 ≠ 期末余额 − 期初余额",
-                                f"期末 {_wan(end_cash)} − 期初 {_wan(begin_cash)} ≠ 净增加额 {_wan(inc_total)} 万元"
-                                f"（差 {_wan_signed(end_cash - begin_cash - inc_total)} 万元）",
-                                rows=[41]))
+        diff = end_cash - begin_cash - inc_total
+        if abs(diff) > tol:
+            # 已知口径：差额若恰为「不计入现金等价物」的科目余额变动（如其他货币资金），
+            # 属正常口径差异（现金等价物不含该科目），降为 I 级提示，不阻断。
+            extra_end, extra_begin, names = _cash_equiv_extra(inputs, config)
+            cands = [extra_end, extra_begin, extra_end - extra_begin]
+            if names and any(abs(abs(diff) - abs(c)) <= tol for c in cands):
+                issues.append(Issue(
+                    "VC-17", Level.I,
+                    f"现金流量表：净增加额与期末−期初的差额为「{'、'.join(names)}」（不计入现金等价物，属正常口径）",
+                    f"期末 {_wan(end_cash)} − 期初 {_wan(begin_cash)} ≠ 净增加额 {_wan(inc_total)} 万元，"
+                    f"差 {_wan_signed(diff)} 万元；恰为「{'、'.join(names)}」余额"
+                    f"（期末 {extra_end} 元 / 期初 {extra_begin} 元）。该科目按本公司口径不计入现金及现金等价物，"
+                    "不影响取数。",
+                    rows=[41]))
+            else:
+                issues.append(Issue("VC-17", Level.E, "现金流量表：现金净增加额 ≠ 期末余额 − 期初余额",
+                                    f"期末 {_wan(end_cash)} − 期初 {_wan(begin_cash)} ≠ 净增加额 {_wan(inc_total)} 万元"
+                                    f"（差 {_wan_signed(diff)} 万元）",
+                                    rows=[41]))
     except KeyError as e:
         issues.append(Issue("VC-17", Level.W, f"现金流量表缺少勾稽所需项目「{e.args[0]}」，跳过该组核对"))
     return issues
@@ -263,10 +297,21 @@ def _cross_checks(inputs: Inputs, config: dict, items: list[ItemSpec],
         money, _, _ = inputs.bs_table.get("货币资金")
         end_cash, _, _ = inputs.cf_table.get("现金的期末余额")
         if abs(money - end_cash) > _tol(rules, "VC-18", d_tol):
-            issues.append(Issue("VC-18", Level.W,
-                                "跨表不符：资产负债表「货币资金」≠ 现金流量表「现金的期末余额」",
-                                f"{_wan(money)} vs {_wan(end_cash)} 万元（差 {_wan_signed(money - end_cash)} 万元）",
-                                rows=[25]))
+            # 已知口径：货币资金含不计入现金等价物的科目（如其他货币资金）
+            extra_end, _extra_begin, names = _cash_equiv_extra(inputs, config)
+            if names and abs(abs(money - end_cash) - abs(extra_end)) <= _tol(rules, "VC-18", d_tol):
+                issues.append(Issue(
+                    "VC-18", Level.I,
+                    f"跨表差异为不计入现金等价物的「{'、'.join(names)}」（属正常口径）",
+                    f"货币资金 {_wan(money)} 万元 vs 现金期末 {_wan(end_cash)} 万元，"
+                    f"差 {_wan_signed(money - end_cash)} 万元；恰为「{'、'.join(names)}」期末余额 "
+                    f"{extra_end} 元（该科目不计入现金及现金等价物）。",
+                    rows=[25]))
+            else:
+                issues.append(Issue("VC-18", Level.W,
+                                    "跨表不符：资产负债表「货币资金」≠ 现金流量表「现金的期末余额」",
+                                    f"{_wan(money)} vs {_wan(end_cash)} 万元（差 {_wan_signed(money - end_cash)} 万元）",
+                                    rows=[25]))
     except KeyError as e:
         issues.append(Issue("VC-18", Level.W, f"跨表核对缺少项目「{e.args[0]}」"))
 
